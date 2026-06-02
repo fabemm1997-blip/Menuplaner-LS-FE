@@ -171,8 +171,13 @@ export default function App() {
         const prev = weekendSlots[0];
         if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
       } else {
-        const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
-        if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
+        // Sunday (dayIdx=6) should never inherit from Saturday Abend - that goes to Monday
+        // Saturday (dayIdx=5) Mittag should not inherit from Friday Abend via weekend toggle
+        const isWeekendMittag = dayIdx === 6; // Sunday Mittag never inherits from Saturday
+        if (!isWeekendMittag) {
+          const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
+          if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
+        }
       }
     }
     return meals.find(m => m.day_index === dayIdx && m.slot === slot) || null;
