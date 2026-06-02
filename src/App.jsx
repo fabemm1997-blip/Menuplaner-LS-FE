@@ -760,3 +760,4 @@ const S = {
   checkedTitle: { fontSize: 14, fontWeight: 600, color: C.green },
   deleteAllBtn: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${C.danger}`, background: "transparent", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: "inherit", fontWeight: 600 },
 };
+ 
