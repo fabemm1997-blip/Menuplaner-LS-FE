@@ -1,0 +1,16 @@
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/" }],
+  "functions": {
+    "api/claude.js": {
+      "maxDuration": 30
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json" }
+      ]
+    }
+  ]
+}
