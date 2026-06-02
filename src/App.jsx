@@ -159,21 +159,41 @@ export default function App() {
 
   function getMeal(dayIdx, slot) {
     if (slot === "mittag") {
-      let prev;
-      if (dayIdx === 0) {
-        // Monday: check Sunday (day_index 6) of previous week
-        prev = prevWeekMeals.find(m => m.day_index === 6 && m.slot === "abend" && m.also_next_lunch);
-      } else {
-        prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
-      }
       const direct = meals.find(m => m.day_index === dayIdx && m.slot === slot);
-      if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
+      if (dayIdx === 0) {
+        // Monday: check all 4 weekend slots (Sa Mittag=5, Sa Abend=5, So Mittag=6, So Abend=6) from prev week
+        const weekendSlots = [
+          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "mittag" && m.also_next_lunch),
+          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "abend" && m.also_next_lunch),
+          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "mittag" && m.also_next_lunch),
+          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "abend" && m.also_next_lunch),
+        ].filter(Boolean);
+        const prev = weekendSlots[0];
+        if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
+      } else {
+        const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
+        if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
+      }
     }
     return meals.find(m => m.day_index === dayIdx && m.slot === slot) || null;
   }
 
   async function saveMeal(dayIdx, slot, updates) {
     const t = await getValidToken(); if (!t) return;
+
+    // Weekend exclusive: if setting also_next_lunch on Sa/So, clear all other weekend slots
+    const isWeekend = (dayIdx === 5 || dayIdx === 6);
+    if (isWeekend && updates.also_next_lunch) {
+      const weekendMeals = meals.filter(m =>
+        (m.day_index === 5 || m.day_index === 6) &&
+        m.also_next_lunch &&
+        !(m.day_index === dayIdx && m.slot === slot)
+      );
+      for (const wm of weekendMeals) {
+        await sb.upsertMeal(t, { ...wm, also_next_lunch: false });
+      }
+    }
+
     const existing = meals.find(m => m.day_index === dayIdx && m.slot === slot);
     const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates };
     if (existing?.id) meal.id = existing.id;
@@ -405,7 +425,7 @@ function PlanPage({ weekStart, setWeekStart, getMeal, saveMeal, removeMeal, gene
               {SLOTS.map(slot => {
                 const meal = getMeal(i, slot);
                 const isEdit = editCell?.dayIdx === i && editCell?.slot === slot;
-                return <MealTile key={slot} slot={slot} meal={meal} isEdit={isEdit}
+                return <MealTile key={slot} slot={slot} meal={meal} isEdit={isEdit} dayIdx={i}
                   onEdit={() => setEditCell(isEdit ? null : { dayIdx: i, slot })}
                   onSave={(u) => { saveMeal(i, slot, u); setEditCell(null); }}
                   onRemove={() => removeMeal(i, slot)}
@@ -426,7 +446,7 @@ function PlanPage({ weekStart, setWeekStart, getMeal, saveMeal, removeMeal, gene
 }
 
 // ── Meal Tile ─────────────────────────────────────────────────────────────────
-function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, token, loadPdfLibrary, getValidToken }) {
+function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, token, loadPdfLibrary, getValidToken, dayIdx }) {
   const [persons, setPersons] = useState(meal?.persons ?? 2);
   const [alsoLunch, setAlsoLunch] = useState(meal?.also_next_lunch ?? false);
   const [nextLunchPersons, setNextLunchPersons] = useState(meal?.next_lunch_persons ?? meal?.persons ?? 2);
@@ -566,13 +586,13 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
             <button style={S.countBtn} onClick={() => setPersons(persons+1)}>+</button>
             <span style={S.personLabel}>Pers.</span>
           </div>
-          {slot === "abend" && (
+          {(slot === "abend" || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && (
             <label style={S.checkLabel}>
               <input type="checkbox" checked={alsoLunch} onChange={e => setAlsoLunch(e.target.checked)} style={{ marginRight: 6 }} />
-              Auch morgen Mittag
+              {(meal?.day_index === 5 || meal?.day_index === 6) ? "→ Montag Mittag" : "Auch morgen Mittag"}
             </label>
           )}
-          {slot === "abend" && alsoLunch && (
+          {((slot === "abend") || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && alsoLunch && (
             <div style={{ ...S.personRow, marginTop: 2 }}>
               <span style={S.personLabel}>🌤 Mittag für:</span>
               <button style={S.countBtn} onClick={() => setNextLunchPersons(p => Math.max(1, p - 1))}>−</button>
