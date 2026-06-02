@@ -74,6 +74,15 @@ Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backw
 }
 
 // Scale ingredients from recipe_persons to cook_persons
+async function scrapeIngredients(link) {
+  try {
+    const r = await fetch('/api/scrape?url=' + encodeURIComponent(link));
+    const d = await r.json();
+    if (d.success && d.ingredients?.length > 0) return { ok: true, ingredients: d.ingredients };
+    return { ok: false };
+  } catch { return { ok: false }; }
+}
+
 function scaleIngredients(ingredients, recipePers, cookPers) {
   if (!ingredients?.length) return [];
   const factor = cookPers / recipePers;
@@ -224,24 +233,41 @@ export default function App() {
 
     // Step 2: Extract ingredients in background after save using temp base64 or library
     const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
-    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name));
+    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name || rec.link));
     if (needsExtraction.length > 0 && savedId) {
       const updatedStored = { ...stored };
+      const failedLinks = [];
       for (const rec of needsExtraction) {
         try {
-          // Use temp base64 (freshly uploaded) or fetch from library
+          // Try scraping link first
+          if (rec.link) {
+            const scraped = await scrapeIngredients(rec.link);
+            if (scraped.ok && scraped.ingredients.length > 0) {
+              updatedStored[rec.id] = scraped.ingredients;
+              continue;
+            } else {
+              failedLinks.push(rec.name || rec.link);
+            }
+          }
+          // Fallback: PDF or name-based extraction
           let pdf = rec.pdf_base64_temp || null;
           if (!pdf && rec.pdf_library_id) {
-            const t2 = await getValidToken();
             const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
             pdf = libItem?.pdf_base64 || null;
           }
-          const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
-          if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
+          if (pdf || rec.pdf_name) {
+            const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
+            if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
+          }
         } catch {}
       }
       await sb.upsertMeal(t, { ...meal, id: savedId, extracted_ingredients: JSON.stringify(updatedStored) });
       await loadMeals();
+      if (failedLinks.length > 0) {
+        alert(`Für "${failedLinks.join(', ')}" konnten keine Zutaten automatisch ausgelesen werden.
+
+Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitte als PDF (Drucken → Als PDF speichern) und lade es in der App hoch.`);
+      }
     }
   }
 
