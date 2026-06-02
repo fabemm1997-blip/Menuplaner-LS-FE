@@ -11,7 +11,7 @@ const sb = {
   async refreshToken(rt) { return (await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, { method: "POST", headers: this.headers, body: JSON.stringify({ refresh_token: rt }) })).json(); },
   authHeaders(token) { return { ...this.headers, Authorization: `Bearer ${token}` }; },
   async getMeals(token, weekStart) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals?week_start=eq.${weekStart}&select=*`, { headers: this.authHeaders(token) })).json(); },
-  async upsertMeal(token, meal) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(meal) })).json(); },
+  async upsertMeal(token, meal) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ ...meal, updated_at: new Date().toISOString() }) })).json(); },
   async deleteMeal(token, id) { await fetch(`${SUPABASE_URL}/rest/v1/meals?id=eq.${id}`, { method: "DELETE", headers: this.authHeaders(token) }); },
   async getShoppingItems(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?select=*&order=category,name`, { headers: this.authHeaders(token) })).json(); },
   async upsertShoppingItem(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
@@ -148,8 +148,21 @@ export default function App() {
     setLoading(true);
     try {
       const t = await getValidToken(); if (!t) { setLoading(false); return; }
-      const mealsWithContent = meals.filter(m => { try { return JSON.parse(m.recipes || "[]").length > 0; } catch { return false; } });
-      if (!mealsWithContent.length) { alert("Keine Menüs diese Woche erfasst."); setLoading(false); return; }
+      const lastGenerated = localStorage.getItem("mp_last_generated");
+      const mealsWithContent = meals.filter(m => {
+        try {
+          const hasRecipes = JSON.parse(m.recipes || "[]").length > 0;
+          if (!hasRecipes) return false;
+          // If never generated before, include all; otherwise only newer meals
+          if (!lastGenerated) return true;
+          return new Date(m.updated_at || m.created_at) > new Date(lastGenerated);
+        } catch { return false; }
+      });
+      if (!mealsWithContent.length) {
+        alert("Keine neuen Menüs seit dem letzten Generieren.");
+        setLoading(false);
+        return;
+      }
       const lines = [];
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
@@ -160,19 +173,18 @@ export default function App() {
       }
       const prompt = `Du bist ein Schweizer Kochassistent. Erstelle eine vollständige Einkaufsliste. Skaliere Zutaten von "Rezept für X Personen" auf "kochen für Y Personen".\n\n${lines.join("\n")}\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Array:\n[{"name":"Zutat","amount":"200","unit":"g","category":"Gemüse & Früchte"}]\nKategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges\n"amount" = nur Zahl als String. Gleiche Zutaten zusammenfassen.`;
       const items = parseJSON(await callClaude(prompt));
-      // Only add items not already on the list (compare by name)
-      const existingNames = shopping.map(s => s.name.toLowerCase().trim());
+      // Add all items, then save timestamp
       let added = 0;
       for (const item of items) {
-        if (!existingNames.includes(item.name.toLowerCase().trim())) {
-          await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
-          added++;
-        }
+        await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
+        added++;
       }
+      // Save timestamp of this generation
+      localStorage.setItem("mp_last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");
-      if (added === 0) alert("Alle Zutaten sind bereits auf der Einkaufsliste.");
-      else alert(`${added} neue Zutaten hinzugefügt.`);
+      if (added === 0) alert("Keine Zutaten gefunden.");
+      else alert(`${added} Zutaten zur Einkaufsliste hinzugefügt.`);
     } catch (e) { alert("Fehler: " + e.message); }
     setLoading(false);
   }
