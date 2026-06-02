@@ -141,7 +141,7 @@ ${ingredientText}
 Antworte NUR mit JSON-Array:
 [{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
 Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
-"amount" ist eine Zahl (0 wenn keine Menge angegeben). Kein Text, kein Markdown.`;
+WICHTIG: "amount" MUSS eine Dezimalzahl sein (z.B. 200, 1.5, 0.5) - NIEMALS ein String. Brüche umrechnen: ½=0.5, ¼=0.25, ⅓=0.333. Kein Text, kein Markdown.`;
 
   return await callClaude(prompt);
 }
