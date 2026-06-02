@@ -249,15 +249,19 @@ export default function App() {
               failedLinks.push(rec.name || rec.link);
             }
           }
-          // Fallback: PDF or name-based extraction
+          // Fallback: PDF only (no name-based guessing)
           let pdf = rec.pdf_base64_temp || null;
           if (!pdf && rec.pdf_library_id) {
             const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
             pdf = libItem?.pdf_base64 || null;
           }
-          if (pdf || rec.pdf_name) {
+          if (pdf) {
             const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
             if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
+          }
+          // No PDF and scraping failed → add to failed list if not already there
+          if (!pdf && rec.link && !failedLinks.includes(rec.name || rec.link)) {
+            // already added above
           }
         } catch {}
       }
@@ -313,11 +317,8 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
             const scaled = scaleIngredients(storedIngredients, recipePers, cookPers);
             allItems.push(...scaled);
           } else {
-            // Fallback: ask Claude to extract + scale
-            const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
-            const extracted = await extractIngredients(name, rec.pdf_base64 || null);
-            const scaled = scaleIngredients(extracted, recipePers, cookPers);
-            allItems.push(...scaled);
+            // No ingredients stored - user was warned when saving
+            // Skip this recipe silently
           }
         }
       }
