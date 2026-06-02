@@ -29,14 +29,23 @@ const sb = {
   },
 };
 
-async function callClaude(prompt, pdfBase64 = null) {
+async function callClaude(prompt, pdfBase64 = null, retries = 3) {
   const messages = pdfBase64
     ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: prompt }] }]
     : [{ role: "user", content: prompt }];
-  const r = await fetch("/api/claude", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_tokens: 2000, messages }) });
-  const d = await r.json();
-  if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
-  return d.content?.map(b => b.text || "").join("") || "";
+  for (let i = 0; i < retries; i++) {
+    const r = await fetch("/api/claude", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_tokens: 2000, messages }) });
+    const d = await r.json();
+    if (d.error?.type === "overloaded_error") {
+      if (i < retries - 1) {
+        await new Promise(res => setTimeout(res, 3000 * (i + 1)));
+        continue;
+      }
+      throw new Error("Claude API ist überlastet. Bitte in 1-2 Minuten nochmal versuchen.");
+    }
+    if (d.error) throw new Error(d.error.message || JSON.stringify(d.error));
+    return d.content?.map(b => b.text || "").join("") || "";
+  }
 }
 
 function parseJSON(raw) {
@@ -44,6 +53,25 @@ function parseJSON(raw) {
   const start = s.indexOf("["), end = s.lastIndexOf("]");
   if (start === -1 || end === -1) throw new Error("Kein JSON-Array: " + s.slice(0, 200));
   return JSON.parse(s.slice(start, end + 1));
+}
+
+async function extractIngredients(recipeName, pdfBase64 = null, link = null) {
+  const prompt = `Extrahiere alle Zutaten aus diesem Rezept "${recipeName}".
+Antworte AUSSCHLIESSLICH mit einem JSON-Array:
+[{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
+Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
+"amount" ist eine Zahl (nicht String). Kein Text, kein Markdown.`;
+  try {
+    const raw = await callClaude(prompt, pdfBase64 || null);
+    return parseJSON(raw);
+  } catch { return []; }
+}
+
+// Scale ingredients from recipe_persons to cook_persons
+function scaleIngredients(ingredients, recipePers, cookPers) {
+  if (!ingredients?.length) return [];
+  const factor = cookPers / recipePers;
+  return ingredients.map(i => ({ ...i, amount: Math.round((i.amount * factor) * 100) / 100 }));
 }
 
 const DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
@@ -133,7 +161,7 @@ export default function App() {
         prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
       }
       const direct = meals.find(m => m.day_index === dayIdx && m.slot === slot);
-      if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag" };
+      if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
     }
     return meals.find(m => m.day_index === dayIdx && m.slot === slot) || null;
   }
@@ -141,8 +169,25 @@ export default function App() {
   async function saveMeal(dayIdx, slot, updates) {
     const t = await getValidToken(); if (!t) return;
     const existing = meals.find(m => m.day_index === dayIdx && m.slot === slot);
-    const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, recipes: "[]", ...(existing || {}), ...updates };
+    const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates };
     if (existing?.id) meal.id = existing.id;
+
+    // Extract ingredients for any new/changed recipes
+    const recipes = JSON.parse(meal.recipes || "[]");
+    const stored = JSON.parse(meal.extracted_ingredients || "{}");
+    for (const rec of recipes) {
+      if (!stored[rec.id] && (rec.name || rec.pdf_name)) {
+        try {
+          const ingredients = await extractIngredients(
+            rec.name || rec.pdf_name,
+            rec.pdf_base64 || null,
+            rec.link || null
+          );
+          if (ingredients.length > 0) stored[rec.id] = ingredients;
+        } catch {}
+      }
+    }
+    meal.extracted_ingredients = JSON.stringify(stored);
     await sb.upsertMeal(t, meal); await loadMeals();
   }
 
@@ -170,16 +215,44 @@ export default function App() {
         setLoading(false);
         return;
       }
-      const lines = [];
+      // Use stored ingredients and scale mathematically
+      const allItems = [];
+      const extractedMap = JSON.parse(mealsWithContent[0]?.extracted_ingredients || "{}");
+
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
+        const cookPers = m.persons || 2;
+        const stored = JSON.parse(m.extracted_ingredients || "{}");
+
         for (const rec of recipes) {
-          const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
-          lines.push(`- ${DAYS[m.day_index]} ${SLOT_LABELS[m.slot]}: "${name}" – Rezept für ${rec.recipe_persons||2} Personen, kochen für ${m.persons||2} Personen${rec.link ? ` (${rec.link})` : ""}`);
+          const recipePers = rec.recipe_persons || 2;
+          const storedIngredients = stored[rec.id] || [];
+
+          if (storedIngredients.length > 0) {
+            // Use stored + scale mathematically
+            const scaled = scaleIngredients(storedIngredients, recipePers, cookPers);
+            allItems.push(...scaled);
+          } else {
+            // Fallback: ask Claude to extract + scale
+            const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
+            const extracted = await extractIngredients(name, rec.pdf_base64 || null, rec.link || null);
+            const scaled = scaleIngredients(extracted, recipePers, cookPers);
+            allItems.push(...scaled);
+          }
         }
       }
-      const prompt = `Du bist ein Schweizer Kochassistent. Erstelle eine vollständige Einkaufsliste. Skaliere Zutaten von "Rezept für X Personen" auf "kochen für Y Personen".\n\n${lines.join("\n")}\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Array:\n[{"name":"Zutat","amount":"200","unit":"g","category":"Gemüse & Früchte"}]\nKategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges\n"amount" = nur Zahl als String. Gleiche Zutaten zusammenfassen.`;
-      const items = parseJSON(await callClaude(prompt));
+
+      // Merge duplicate ingredients
+      const merged = {};
+      for (const item of allItems) {
+        const key = item.name.toLowerCase().trim();
+        if (merged[key]) {
+          merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
+        } else {
+          merged[key] = { ...item };
+        }
+      }
+      const items = Object.values(merged);
       // Add all items, then save timestamp
       let added = 0;
       for (const item of items) {
@@ -327,11 +400,13 @@ function PlanPage({ weekStart, setWeekStart, getMeal, saveMeal, removeMeal, gene
 function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, token, loadPdfLibrary, getValidToken }) {
   const [persons, setPersons] = useState(meal?.persons ?? 2);
   const [alsoLunch, setAlsoLunch] = useState(meal?.also_next_lunch ?? false);
+  const [nextLunchPersons, setNextLunchPersons] = useState(meal?.next_lunch_persons ?? meal?.persons ?? 2);
   const [recipes, setRecipes] = useState(() => { try { return JSON.parse(meal?.recipes || "[]"); } catch { return []; } });
 
   useEffect(() => {
     setPersons(meal?.persons ?? 2);
     setAlsoLunch(meal?.also_next_lunch ?? false);
+    setNextLunchPersons(meal?.next_lunch_persons ?? meal?.persons ?? 2);
     try { setRecipes(JSON.parse(meal?.recipes || "[]")); } catch { setRecipes([]); }
   }, [meal?.id, isEdit]);
 
@@ -440,7 +515,16 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
               Auch morgen Mittag
             </label>
           )}
-          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch, recipes: JSON.stringify(recipes) })}>Speichern</button>
+          {slot === "abend" && alsoLunch && (
+            <div style={{ ...S.personRow, marginTop: 2 }}>
+              <span style={S.personLabel}>🌤 Mittag für:</span>
+              <button style={S.countBtn} onClick={() => setNextLunchPersons(p => Math.max(1, p - 1))}>−</button>
+              <span style={S.personCount}>{nextLunchPersons}</span>
+              <button style={S.countBtn} onClick={() => setNextLunchPersons(p => p + 1)}>+</button>
+              <span style={S.personLabel}>Pers.</span>
+            </div>
+          )}
+          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch, next_lunch_persons: nextLunchPersons, recipes: JSON.stringify(recipes) })}>Speichern</button>
         </div>
       )}
     </div>
