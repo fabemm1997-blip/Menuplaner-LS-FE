@@ -186,24 +186,35 @@ export default function App() {
     }
     meal.extracted_ingredients = JSON.stringify(stored);
 
-    // Step 1: Save immediately
+    // Strip large base64 data from recipes before saving to DB
+    const recipesForDb = recipes.map(rec => {
+      const { pdf_base64, pdf_base64_temp, _ingredients, ...rest } = rec;
+      return rest;
+    });
+    meal.recipes = JSON.stringify(recipesForDb);
+
+    // Step 1: Save immediately (no large base64 in DB)
     const saved = await sb.upsertMeal(t, meal);
     await loadMeals();
 
-    // Step 2: Extract ingredients in background after save
+    // Step 2: Extract ingredients in background after save using temp base64 or library
     const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
-    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name || rec.pdf_base64));
+    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name));
     if (needsExtraction.length > 0 && savedId) {
       const updatedStored = { ...stored };
       for (const rec of needsExtraction) {
         try {
-          // Only send PDF if under 3MB (base64), otherwise use name only
-          const pdf = rec.pdf_base64 && rec.pdf_base64.length < 4000000 ? rec.pdf_base64 : null;
+          // Use temp base64 (freshly uploaded) or fetch from library
+          let pdf = rec.pdf_base64_temp || null;
+          if (!pdf && rec.pdf_library_id) {
+            const t2 = await getValidToken();
+            const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
+            pdf = libItem?.pdf_base64 || null;
+          }
           const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
           if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
         } catch {}
       }
-      // Save extracted ingredients back
       await sb.upsertMeal(t, { ...meal, id: savedId, extracted_ingredients: JSON.stringify(updatedStored) });
       await loadMeals();
     }
@@ -436,14 +447,32 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
     if (!file) return;
     updateRecipe(id, "pdf_name", file.name);
     const base64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.onerror = rej; r.readAsDataURL(file); });
-    updateRecipe(id, "pdf_base64", base64); updateRecipe(id, "type", "pdf");
-    try { const t = await getValidToken(); if (t) await sb.savePdfToLibrary(t, { name: file.name, pdf_base64: base64 }); await loadPdfLibrary(); } catch {}
-    try { const raw = await callClaude("Extrahiere den Menünamen aus diesem Rezept-PDF. Antworte NUR mit dem Namen.", base64); updateRecipe(id, "name", raw.trim()); } catch {}
+    updateRecipe(id, "type", "pdf");
+    try {
+      const t = await getValidToken();
+      if (t) {
+        const saved = await sb.savePdfToLibrary(t, { name: file.name, pdf_base64: base64 });
+        const libId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
+        if (libId) updateRecipe(id, "pdf_library_id", libId);
+        // Store base64 temporarily in memory only for name extraction
+        updateRecipe(id, "pdf_base64_temp", base64);
+        await loadPdfLibrary();
+      }
+    } catch {}
+    try {
+      const raw = await callClaude("Extrahiere den Menünamen aus diesem Rezept-PDF. Antworte NUR mit dem Namen.", base64);
+      updateRecipe(id, "name", raw.trim());
+    } catch {}
   }
 
-  function openPdf(rec) {
-    if (!rec.pdf_base64) return;
-    const b = atob(rec.pdf_base64), arr = new Uint8Array(b.length);
+  async function openPdf(rec) {
+    let base64 = rec.pdf_base64 || null;
+    if (!base64 && rec.pdf_library_id) {
+      const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
+      base64 = libItem?.pdf_base64 || null;
+    }
+    if (!base64) return;
+    const b = atob(base64), arr = new Uint8Array(b.length);
     for (let i = 0; i < b.length; i++) arr[i] = b.charCodeAt(i);
     window.open(URL.createObjectURL(new Blob([arr], { type: "application/pdf" })), "_blank");
   }
@@ -506,7 +535,8 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
                   const item = pdfLibrary.find(p => p.id === e.target.value);
                   if (item) {
                     updateRecipe(rec.id, "pdf_name", item.name);
-                    updateRecipe(rec.id, "pdf_base64", item.pdf_base64);
+                    updateRecipe(rec.id, "pdf_library_id", item.id);
+                    updateRecipe(rec.id, "pdf_base64", ""); // clear old base64
                     const recName = rec.name || item.name.replace(".pdf","");
                     if (!rec.name) updateRecipe(rec.id, "name", recName);
                     // Extract ingredients from library PDF (async)
