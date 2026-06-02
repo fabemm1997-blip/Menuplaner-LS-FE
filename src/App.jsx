@@ -86,7 +86,11 @@ async function scrapeIngredients(link) {
 function scaleIngredients(ingredients, recipePers, cookPers) {
   if (!ingredients?.length) return [];
   const factor = cookPers / recipePers;
-  return ingredients.map(i => ({ ...i, amount: Math.round((i.amount * factor) * 100) / 100 }));
+  return ingredients.map(i => {
+    const amount = parseFloat(String(i.amount).replace(",", ".")) || 0;
+    const scaled = amount > 0 ? Math.round((amount * factor) * 100) / 100 : 0;
+    return { ...i, amount: scaled };
+  });
 }
 
 const DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
