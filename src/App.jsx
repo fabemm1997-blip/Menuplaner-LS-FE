@@ -197,7 +197,9 @@ export default function App() {
       const updatedStored = { ...stored };
       for (const rec of needsExtraction) {
         try {
-          const ingredients = await extractIngredients(rec.name || rec.pdf_name, rec.pdf_base64 || null);
+          // Only send PDF if under 3MB (base64), otherwise use name only
+          const pdf = rec.pdf_base64 && rec.pdf_base64.length < 4000000 ? rec.pdf_base64 : null;
+          const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
           if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
         } catch {}
       }
