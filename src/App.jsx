@@ -499,11 +499,10 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
                     updateRecipe(rec.id, "pdf_base64", item.pdf_base64);
                     const recName = rec.name || item.name.replace(".pdf","");
                     if (!rec.name) updateRecipe(rec.id, "name", recName);
-                    // Extract ingredients from library PDF
-                    try {
-                      const ingr = await extractIngredients(recName, item.pdf_base64);
+                    // Extract ingredients from library PDF (async)
+                    extractIngredients(recName, item.pdf_base64).then(ingr => {
                       if (ingr.length > 0) updateRecipe(rec.id, "_ingredients", ingr);
-                    } catch {}
+                    }).catch(() => {});
                   }
                 }} defaultValue="">
                   <option value="" disabled>Rezept wählen…</option>
@@ -760,4 +759,3 @@ const S = {
   checkedTitle: { fontSize: 14, fontWeight: 600, color: C.green },
   deleteAllBtn: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${C.danger}`, background: "transparent", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: "inherit", fontWeight: 600 },
 };
- 
