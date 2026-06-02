@@ -182,7 +182,10 @@ export default function App() {
     const recipes = JSON.parse(meal.recipes || "[]");
     const stored = JSON.parse(meal.extracted_ingredients || "{}");
     for (const rec of recipes) {
-      if (!stored[rec.id] && (rec.name || rec.pdf_name)) {
+      // Use pre-extracted ingredients if available (from library selection)
+      if (rec._ingredients?.length > 0) {
+        stored[rec.id] = rec._ingredients;
+      } else if (!stored[rec.id] && (rec.name || rec.pdf_name)) {
         try {
           const ingredients = await extractIngredients(
             rec.name || rec.pdf_name,
@@ -491,7 +494,17 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
               {rec.type === "library" && (
                 <select style={S.tileSelect} onChange={e => {
                   const item = pdfLibrary.find(p => p.id === e.target.value);
-                  if (item) { updateRecipe(rec.id, "pdf_name", item.name); updateRecipe(rec.id, "pdf_base64", item.pdf_base64); if (!rec.name) updateRecipe(rec.id, "name", item.name.replace(".pdf","")); }
+                  if (item) {
+                    updateRecipe(rec.id, "pdf_name", item.name);
+                    updateRecipe(rec.id, "pdf_base64", item.pdf_base64);
+                    const recName = rec.name || item.name.replace(".pdf","");
+                    if (!rec.name) updateRecipe(rec.id, "name", recName);
+                    // Extract ingredients from library PDF
+                    try {
+                      const ingr = await extractIngredients(recName, item.pdf_base64);
+                      if (ingr.length > 0) updateRecipe(rec.id, "_ingredients", ingr);
+                    } catch {}
+                  }
                 }} defaultValue="">
                   <option value="" disabled>Rezept wählen…</option>
                   {pdfLibrary.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
