@@ -68,6 +68,7 @@ export default function App() {
   const [page, setPage] = useState("plan");
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [meals, setMeals] = useState([]);
+  const [prevWeekMeals, setPrevWeekMeals] = useState([]);
   const [shopping, setShopping] = useState([]);
   const [pdfLibrary, setPdfLibrary] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -88,8 +89,12 @@ export default function App() {
   const loadMeals = useCallback(async () => {
     if (!token) return;
     const t = await getValidToken(); if (!t) return;
-    const data = await sb.getMeals(t, wk);
+    const [data, prevData] = await Promise.all([
+      sb.getMeals(t, wk),
+      sb.getMeals(t, weekKey(addDays(weekStart, -7))),
+    ]);
     if (Array.isArray(data)) setMeals(data);
+    if (Array.isArray(prevData)) setPrevWeekMeals(prevData);
   }, [token, wk]);
 
   const loadShopping = useCallback(async () => {
@@ -112,7 +117,13 @@ export default function App() {
 
   function getMeal(dayIdx, slot) {
     if (slot === "mittag") {
-      const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
+      let prev;
+      if (dayIdx === 0) {
+        // Monday: check Sunday (day_index 6) of previous week
+        prev = prevWeekMeals.find(m => m.day_index === 6 && m.slot === "abend" && m.also_next_lunch);
+      } else {
+        prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
+      }
       const direct = meals.find(m => m.day_index === dayIdx && m.slot === slot);
       if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag" };
     }
@@ -245,11 +256,17 @@ function PlanPage({ weekStart, setWeekStart, getMeal, saveMeal, removeMeal, gene
       {/* Mobile day nav */}
       {isMobile && (
         <div style={S.dayNav}>
-          <button style={S.dayNavBtn} onClick={() => setDayOffset(o => Math.max(0, o - 1))} disabled={dayOffset === 0}>‹</button>
+          <button style={S.dayNavBtn} onClick={() => {
+            if (dayOffset === 0) { setWeekStart(w => addDays(w, -7)); setDayOffset(6); }
+            else setDayOffset(o => o - 1);
+          }}>‹</button>
           <span style={S.dayNavLabel}>
             {DAYS[dayOffset]}, {fmtFull(addDays(weekStart, dayOffset))}
           </span>
-          <button style={S.dayNavBtn} onClick={() => setDayOffset(o => Math.min(6, o + 1))} disabled={dayOffset >= 6}>›</button>
+          <button style={S.dayNavBtn} onClick={() => {
+            if (dayOffset >= 6) { setWeekStart(w => addDays(w, 7)); setDayOffset(0); }
+            else setDayOffset(o => o + 1);
+          }}>›</button>
         </div>
       )}
 
