@@ -589,7 +589,7 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
           {(slot === "abend" || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && (
             <label style={S.checkLabel}>
               <input type="checkbox" checked={alsoLunch} onChange={e => setAlsoLunch(e.target.checked)} style={{ marginRight: 6 }} />
-              {(meal?.day_index === 5 || meal?.day_index === 6) ? "→ Montag Mittag" : "Auch morgen Mittag"}
+              {(dayIdx === 5 || dayIdx === 6) ? "→ Montag Mittag" : "Auch morgen Mittag"}
             </label>
           )}
           {((slot === "abend") || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && alsoLunch && (
