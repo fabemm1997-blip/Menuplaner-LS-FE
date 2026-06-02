@@ -55,12 +55,18 @@ function parseJSON(raw) {
   return JSON.parse(s.slice(start, end + 1));
 }
 
-async function extractIngredients(recipeName, pdfBase64 = null, link = null) {
-  const prompt = `Extrahiere alle Zutaten aus diesem Rezept "${recipeName}".
+async function extractIngredients(recipeName, pdfBase64 = null) {
+  // Only extract from PDF or recipe name - never try to fetch URLs (blocked by CORS/auth)
+  const prompt = pdfBase64
+    ? `Extrahiere alle Zutaten aus diesem Rezept-PDF. Antworte AUSSCHLIESSLICH mit einem JSON-Array:
+[{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
+Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
+"amount" ist eine Zahl. Kein Text, kein Markdown.`
+    : `Schätze die typischen Zutaten für das Schweizer/Deutsche Rezept "${recipeName}" für 2 Personen.
 Antworte AUSSCHLIESSLICH mit einem JSON-Array:
 [{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
 Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
-"amount" ist eine Zahl (nicht String). Kein Text, kein Markdown.`;
+"amount" ist eine Zahl. Kein Text, kein Markdown.`;
   try {
     const raw = await callClaude(prompt, pdfBase64 || null);
     return parseJSON(raw);
@@ -180,8 +186,7 @@ export default function App() {
         try {
           const ingredients = await extractIngredients(
             rec.name || rec.pdf_name,
-            rec.pdf_base64 || null,
-            rec.link || null
+            rec.pdf_base64 || null
           );
           if (ingredients.length > 0) stored[rec.id] = ingredients;
         } catch {}
@@ -235,7 +240,7 @@ export default function App() {
           } else {
             // Fallback: ask Claude to extract + scale
             const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
-            const extracted = await extractIngredients(name, rec.pdf_base64 || null, rec.link || null);
+            const extracted = await extractIngredients(name, rec.pdf_base64 || null);
             const scaled = scaleIngredients(extracted, recipePers, cookPers);
             allItems.push(...scaled);
           }
