@@ -178,25 +178,33 @@ export default function App() {
     const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates };
     if (existing?.id) meal.id = existing.id;
 
-    // Extract ingredients for any new/changed recipes
+    // Use pre-extracted ingredients from library selection if available
     const recipes = JSON.parse(meal.recipes || "[]");
     const stored = JSON.parse(meal.extracted_ingredients || "{}");
     for (const rec of recipes) {
-      // Use pre-extracted ingredients if available (from library selection)
-      if (rec._ingredients?.length > 0) {
-        stored[rec.id] = rec._ingredients;
-      } else if (!stored[rec.id] && (rec.name || rec.pdf_name)) {
-        try {
-          const ingredients = await extractIngredients(
-            rec.name || rec.pdf_name,
-            rec.pdf_base64 || null
-          );
-          if (ingredients.length > 0) stored[rec.id] = ingredients;
-        } catch {}
-      }
+      if (rec._ingredients?.length > 0) stored[rec.id] = rec._ingredients;
     }
     meal.extracted_ingredients = JSON.stringify(stored);
-    await sb.upsertMeal(t, meal); await loadMeals();
+
+    // Step 1: Save immediately
+    const saved = await sb.upsertMeal(t, meal);
+    await loadMeals();
+
+    // Step 2: Extract ingredients in background after save
+    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
+    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name || rec.pdf_base64));
+    if (needsExtraction.length > 0 && savedId) {
+      const updatedStored = { ...stored };
+      for (const rec of needsExtraction) {
+        try {
+          const ingredients = await extractIngredients(rec.name || rec.pdf_name, rec.pdf_base64 || null);
+          if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
+        } catch {}
+      }
+      // Save extracted ingredients back
+      await sb.upsertMeal(t, { ...meal, id: savedId, extracted_ingredients: JSON.stringify(updatedStored) });
+      await loadMeals();
+    }
   }
 
   async function removeMeal(dayIdx, slot) {
