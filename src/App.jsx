@@ -232,9 +232,9 @@ export default function App() {
     await loadMeals();
 
     // Step 2: Extract ingredients in background after save using temp base64 or library
-    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
+    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id || meal.id;
     const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name || rec.link));
-    if (needsExtraction.length > 0 && savedId) {
+    if (needsExtraction.length > 0) {
       const updatedStored = { ...stored };
       const failedLinks = [];
       for (const rec of needsExtraction) {
