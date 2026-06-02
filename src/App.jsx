@@ -19,6 +19,14 @@ const sb = {
   async updateShoppingItem(token, id, updates) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "PATCH", headers: { ...this.authHeaders(token), Prefer: "return=representation" }, body: JSON.stringify(updates) })).json(); },
   async getPdfLibrary(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library?select=*&order=name`, { headers: this.authHeaders(token) })).json(); },
   async savePdfToLibrary(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
+  async getSetting(token, key) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?key=eq.${key}&select=value`, { headers: this.authHeaders(token) });
+    const d = await r.json();
+    return Array.isArray(d) && d.length > 0 ? d[0].value : null;
+  },
+  async setSetting(token, key, value) {
+    await fetch(`${SUPABASE_URL}/rest/v1/app_settings`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates" }, body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }) });
+  },
 };
 
 async function callClaude(prompt, pdfBase64 = null) {
@@ -148,12 +156,11 @@ export default function App() {
     setLoading(true);
     try {
       const t = await getValidToken(); if (!t) { setLoading(false); return; }
-      const lastGenerated = localStorage.getItem("mp_last_generated");
+      const lastGenerated = await sb.getSetting(t, "last_generated");
       const mealsWithContent = meals.filter(m => {
         try {
           const hasRecipes = JSON.parse(m.recipes || "[]").length > 0;
           if (!hasRecipes) return false;
-          // If never generated before, include all; otherwise only newer meals
           if (!lastGenerated) return true;
           return new Date(m.updated_at || m.created_at) > new Date(lastGenerated);
         } catch { return false; }
@@ -179,8 +186,8 @@ export default function App() {
         await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
         added++;
       }
-      // Save timestamp of this generation
-      localStorage.setItem("mp_last_generated", new Date().toISOString());
+      // Save timestamp to Supabase (shared across devices)
+      await sb.setSetting(t, "last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");
       if (added === 0) alert("Keine Zutaten gefunden.");
