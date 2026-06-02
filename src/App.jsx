@@ -19,6 +19,9 @@ const sb = {
   async updateShoppingItem(token, id, updates) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "PATCH", headers: { ...this.authHeaders(token), Prefer: "return=representation" }, body: JSON.stringify(updates) })).json(); },
   async getPdfLibrary(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library?select=*&order=name`, { headers: this.authHeaders(token) })).json(); },
   async savePdfToLibrary(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
+  async getAllMeals(token) {
+    return (await fetch(`${SUPABASE_URL}/rest/v1/meals?select=*&order=week_start,day_index`, { headers: this.authHeaders(token) })).json();
+  },
   async getSetting(token, key) {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?key=eq.${key}&select=value`, { headers: this.authHeaders(token) });
     const d = await r.json();
@@ -289,8 +292,14 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
     setLoading(true);
     try {
       const t = await getValidToken(); if (!t) { setLoading(false); return; }
+
+      // Load ALL meals from DB (not just current week)
       const lastGenerated = await sb.getSetting(t, "last_generated");
-      const mealsWithContent = meals.filter(m => {
+      const allMeals = await sb.getAllMeals(t);
+      if (!Array.isArray(allMeals)) { alert("Fehler beim Laden der Menüs."); setLoading(false); return; }
+
+      // Filter: only meals with recipes, updated since last generated
+      const mealsWithContent = allMeals.filter(m => {
         try {
           const hasRecipes = JSON.parse(m.recipes || "[]").length > 0;
           if (!hasRecipes) return false;
@@ -298,32 +307,27 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
           return new Date(m.updated_at || m.created_at) > new Date(lastGenerated);
         } catch { return false; }
       });
+
       if (!mealsWithContent.length) {
         alert("Keine neuen Menüs seit dem letzten Generieren.");
         setLoading(false);
         return;
       }
-      // Use stored ingredients and scale mathematically
-      const allItems = [];
-      const extractedMap = JSON.parse(mealsWithContent[0]?.extracted_ingredients || "{}");
 
+      const allItems = [];
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
-        const cookPers = m.persons || 2;
+        // If also_next_lunch: cook for abend + mittag persons combined (cook once, eat twice)
+        const cookPers = (m.persons || 2) + (m.also_next_lunch ? (m.next_lunch_persons || m.persons || 2) : 0);
         const stored = JSON.parse(m.extracted_ingredients || "{}");
 
         for (const rec of recipes) {
           const recipePers = rec.recipe_persons || 2;
           const storedIngredients = stored[rec.id] || [];
-
           if (storedIngredients.length > 0) {
-            // Use stored + scale mathematically
-            const scaled = scaleIngredients(storedIngredients, recipePers, cookPers);
-            allItems.push(...scaled);
-          } else {
-            // No ingredients stored - user was warned when saving
-            // Skip this recipe silently
+            allItems.push(...scaleIngredients(storedIngredients, recipePers, cookPers));
           }
+          // No ingredients stored → skip (user was warned when saving)
         }
       }
 
@@ -331,20 +335,16 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
       const merged = {};
       for (const item of allItems) {
         const key = item.name.toLowerCase().trim();
-        if (merged[key]) {
-          merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
-        } else {
-          merged[key] = { ...item };
-        }
+        if (merged[key]) merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
+        else merged[key] = { ...item };
       }
       const items = Object.values(merged);
-      // Add all items, then save timestamp
+
       let added = 0;
       for (const item of items) {
         await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
         added++;
       }
-      // Save timestamp to Supabase (shared across devices)
       await sb.setSetting(t, "last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");
