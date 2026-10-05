@@ -19,9 +19,6 @@ const sb = {
   async updateShoppingItem(token, id, updates) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "PATCH", headers: { ...this.authHeaders(token), Prefer: "return=representation" }, body: JSON.stringify(updates) })).json(); },
   async getPdfLibrary(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library?select=*&order=name`, { headers: this.authHeaders(token) })).json(); },
   async savePdfToLibrary(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
-  async getAllMeals(token) {
-    return (await fetch(`${SUPABASE_URL}/rest/v1/meals?select=*&order=week_start,day_index`, { headers: this.authHeaders(token) })).json();
-  },
   async getSetting(token, key) {
     const r = await fetch(`${SUPABASE_URL}/rest/v1/app_settings?key=eq.${key}&select=value`, { headers: this.authHeaders(token) });
     const d = await r.json();
@@ -77,23 +74,10 @@ Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backw
 }
 
 // Scale ingredients from recipe_persons to cook_persons
-async function scrapeIngredients(link) {
-  try {
-    const r = await fetch('/api/scrape?url=' + encodeURIComponent(link));
-    const d = await r.json();
-    if (d.success && d.ingredients?.length > 0) return { ok: true, ingredients: d.ingredients };
-    return { ok: false };
-  } catch { return { ok: false }; }
-}
-
 function scaleIngredients(ingredients, recipePers, cookPers) {
   if (!ingredients?.length) return [];
   const factor = cookPers / recipePers;
-  return ingredients.map(i => {
-    const amount = parseFloat(String(i.amount).replace(",", ".")) || 0;
-    const scaled = amount > 0 ? Math.round((amount * factor) * 100) / 100 : 0;
-    return { ...i, amount: scaled };
-  });
+  return ingredients.map(i => ({ ...i, amount: Math.round((i.amount * factor) * 100) / 100 }));
 }
 
 const DAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
@@ -239,46 +223,25 @@ export default function App() {
     await loadMeals();
 
     // Step 2: Extract ingredients in background after save using temp base64 or library
-    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id || meal.id;
-    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name || rec.link));
-    if (needsExtraction.length > 0) {
+    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
+    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name));
+    if (needsExtraction.length > 0 && savedId) {
       const updatedStored = { ...stored };
-      const failedLinks = [];
       for (const rec of needsExtraction) {
         try {
-          // Try scraping link first
-          if (rec.link) {
-            const scraped = await scrapeIngredients(rec.link);
-            if (scraped.ok && scraped.ingredients.length > 0) {
-              updatedStored[rec.id] = scraped.ingredients;
-              continue;
-            } else {
-              failedLinks.push(rec.name || rec.link);
-            }
-          }
-          // Fallback: PDF only (no name-based guessing)
+          // Use temp base64 (freshly uploaded) or fetch from library
           let pdf = rec.pdf_base64_temp || null;
           if (!pdf && rec.pdf_library_id) {
+            const t2 = await getValidToken();
             const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
             pdf = libItem?.pdf_base64 || null;
           }
-          if (pdf) {
-            const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
-            if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
-          }
-          // No PDF and scraping failed → add to failed list if not already there
-          if (!pdf && rec.link && !failedLinks.includes(rec.name || rec.link)) {
-            // already added above
-          }
+          const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
+          if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
         } catch {}
       }
       await sb.upsertMeal(t, { ...meal, id: savedId, extracted_ingredients: JSON.stringify(updatedStored) });
       await loadMeals();
-      if (failedLinks.length > 0) {
-        alert(`Für "${failedLinks.join(', ')}" konnten keine Zutaten automatisch ausgelesen werden.
-
-Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitte als PDF (Drucken → Als PDF speichern) und lade es in der App hoch.`);
-      }
     }
   }
 
@@ -292,14 +255,8 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
     setLoading(true);
     try {
       const t = await getValidToken(); if (!t) { setLoading(false); return; }
-
-      // Load ALL meals from DB (not just current week)
       const lastGenerated = await sb.getSetting(t, "last_generated");
-      const allMeals = await sb.getAllMeals(t);
-      if (!Array.isArray(allMeals)) { alert("Fehler beim Laden der Menüs."); setLoading(false); return; }
-
-      // Filter: only meals with recipes, updated since last generated
-      const mealsWithContent = allMeals.filter(m => {
+      const mealsWithContent = meals.filter(m => {
         try {
           const hasRecipes = JSON.parse(m.recipes || "[]").length > 0;
           if (!hasRecipes) return false;
@@ -307,27 +264,35 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
           return new Date(m.updated_at || m.created_at) > new Date(lastGenerated);
         } catch { return false; }
       });
-
       if (!mealsWithContent.length) {
         alert("Keine neuen Menüs seit dem letzten Generieren.");
         setLoading(false);
         return;
       }
-
+      // Use stored ingredients and scale mathematically
       const allItems = [];
+      const extractedMap = JSON.parse(mealsWithContent[0]?.extracted_ingredients || "{}");
+
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
-        // If also_next_lunch: cook for abend + mittag persons combined (cook once, eat twice)
-        const cookPers = (m.persons || 2) + (m.also_next_lunch ? (m.next_lunch_persons || m.persons || 2) : 0);
+        const cookPers = m.persons || 2;
         const stored = JSON.parse(m.extracted_ingredients || "{}");
 
         for (const rec of recipes) {
           const recipePers = rec.recipe_persons || 2;
           const storedIngredients = stored[rec.id] || [];
+
           if (storedIngredients.length > 0) {
-            allItems.push(...scaleIngredients(storedIngredients, recipePers, cookPers));
+            // Use stored + scale mathematically
+            const scaled = scaleIngredients(storedIngredients, recipePers, cookPers);
+            allItems.push(...scaled);
+          } else {
+            // Fallback: ask Claude to extract + scale
+            const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
+            const extracted = await extractIngredients(name, rec.pdf_base64 || null);
+            const scaled = scaleIngredients(extracted, recipePers, cookPers);
+            allItems.push(...scaled);
           }
-          // No ingredients stored → skip (user was warned when saving)
         }
       }
 
@@ -335,16 +300,20 @@ Damit die Einkaufsliste korrekt generiert werden kann, speichere das Rezept bitt
       const merged = {};
       for (const item of allItems) {
         const key = item.name.toLowerCase().trim();
-        if (merged[key]) merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
-        else merged[key] = { ...item };
+        if (merged[key]) {
+          merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
+        } else {
+          merged[key] = { ...item };
+        }
       }
       const items = Object.values(merged);
-
+      // Add all items, then save timestamp
       let added = 0;
       for (const item of items) {
         await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
         added++;
       }
+      // Save timestamp to Supabase (shared across devices)
       await sb.setSetting(t, "last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");

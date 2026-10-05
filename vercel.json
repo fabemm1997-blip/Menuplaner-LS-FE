@@ -1,16 +1,17 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/" }],
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/$1" },
+    { "source": "/(.*)", "destination": "/" }
+  ],
   "functions": {
-    "api/claude.js": {
-      "maxDuration": 30
-    }
+    "api/claude.js": { "maxDuration": 30 },
+    "api/scrape.js": { "maxDuration": 30 },
+    "api/ping.js": { "maxDuration": 10 }
   },
-  "headers": [
+  "crons": [
     {
-      "source": "/api/(.*)",
-      "headers": [
-        { "key": "Content-Type", "value": "application/json" }
-      ]
+      "path": "/api/ping",
+      "schedule": "0 6 * * *"
     }
   ]
 }
