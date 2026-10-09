@@ -614,6 +614,48 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
 }
 
 // ── Shopping Page ─────────────────────────────────────────────────────────────
+function MigrosExportBtn({ items }) {
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+
+  async function exportToMigros() {
+    setLoading(true);
+    setResult(null);
+    try {
+      const r = await fetch("/api/migros", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: items.map(i => ({ name: i.name, amount: i.amount, unit: i.unit })) }),
+      });
+      const d = await r.json();
+      setResult(d);
+    } catch (e) {
+      setResult({ success: false, error: e.message });
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div>
+      <button style={S.migrosBtn} onClick={exportToMigros} disabled={loading}>
+        {loading ? "⏳ Wird zu Migros hinzugefügt…" : "🟠 Zu Migros Einkaufsliste"}
+      </button>
+      {result && (
+        <div style={{ ...S.migrosResult, background: result.success ? "rgba(76,175,130,0.1)" : "rgba(255,107,107,0.1)", border: `1px solid ${result.success ? C.green : C.danger}` }}>
+          {result.success ? (
+            <>
+              <div style={{ color: C.green, fontWeight: 600 }}>✅ {result.count} Produkte hinzugefügt</div>
+              {result.notFound?.length > 0 && <div style={{ color: C.muted, fontSize: 12, marginTop: 4 }}>Nicht gefunden: {result.notFound.join(", ")}</div>}
+            </>
+          ) : (
+            <div style={{ color: C.danger }}>❌ {result.error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ShoppingPage({ shopping, token, wk, loadShopping, sb, getValidToken }) {
   const [newName, setNewName] = useState("");
   const [newAmount, setNewAmount] = useState("");
@@ -668,6 +710,10 @@ function ShoppingPage({ shopping, token, wk, loadShopping, sb, getValidToken }) 
         </select>
         <button style={S.addBtn} onClick={addItem}>+ Hinzufügen</button>
       </div>
+
+      {unchecked.length > 0 && (
+        <MigrosExportBtn items={unchecked} />
+      )}
 
       {Object.keys(grouped).length === 0 && checked.length === 0 && (
         <div style={S.emptyState}><div style={{ fontSize: 48, marginBottom: 12 }}>🛒</div><p>Noch keine Einträge.</p></div>
@@ -823,4 +869,6 @@ const S = {
   checkedHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" },
   checkedTitle: { fontSize: 14, fontWeight: 600, color: C.green },
   deleteAllBtn: { padding: "7px 14px", borderRadius: 8, border: `1px solid ${C.danger}`, background: "transparent", color: C.danger, cursor: "pointer", fontSize: 12, fontFamily: "inherit", fontWeight: 600 },
+  migrosBtn: { width: "100%", padding: "12px 0", borderRadius: 10, background: "#ff6600", border: "none", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  migrosResult: { borderRadius: 8, padding: "10px 14px", marginTop: 8, fontSize: 13 },
 };
