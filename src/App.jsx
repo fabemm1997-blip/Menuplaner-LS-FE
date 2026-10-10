@@ -30,9 +30,13 @@ const sb = {
   },
 };
 
-async function callClaude(prompt, pdfBase64 = null, retries = 3) {
+async function callClaude(prompt, pdfBase64 = null, retries = 3, mediaType = "application/pdf") {
+  // PDFs als Dokument, Bilder (z.B. Screenshots in der Bibliothek) als Bild
+  const file = mediaType.startsWith("image/")
+    ? { type: "image", source: { type: "base64", media_type: mediaType, data: pdfBase64 } }
+    : { type: "document", source: { type: "base64", media_type: mediaType, data: pdfBase64 } };
   const messages = pdfBase64
-    ? [{ role: "user", content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: pdfBase64 } }, { type: "text", text: prompt }] }]
+    ? [{ role: "user", content: [file, { type: "text", text: prompt }] }]
     : [{ role: "user", content: prompt }];
   for (let i = 0; i < retries; i++) {
     const r = await fetch("/api/claude", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_tokens: 2000, messages }) });
@@ -56,22 +60,46 @@ function parseJSON(raw) {
   return JSON.parse(s.slice(start, end + 1));
 }
 
-async function extractIngredients(recipeName, pdfBase64 = null) {
-  // Only extract from PDF or recipe name - never try to fetch URLs (blocked by CORS/auth)
-  const prompt = pdfBase64
-    ? `Extrahiere alle Zutaten aus diesem Rezept-PDF. Antworte AUSSCHLIESSLICH mit einem JSON-Array:
-[{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
-Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
-"amount" ist eine Zahl. Kein Text, kein Markdown.`
-    : `Schätze die typischen Zutaten für das Schweizer/Deutsche Rezept "${recipeName}" für 2 Personen.
-Antworte AUSSCHLIESSLICH mit einem JSON-Array:
-[{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]
-Kategorien: Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges
-"amount" ist eine Zahl. Kein Text, kein Markdown.`;
-  try {
-    const raw = await callClaude(prompt, pdfBase64 || null);
-    return parseJSON(raw);
-  } catch { return []; }
+// Zutaten kommen nur aus einer hinterlegten Quelle: PDF/Bild oder Rezept-Link.
+// Rezepte nur mit Namen (z.B. «Raclette») liefern bewusst keine Zutaten.
+const CATEGORIES = "Gemüse & Früchte, Fleisch & Fisch, Milchprodukte, Getreide & Backwaren, Hülsenfrüchte, Gewürze & Saucen, Konserven, Tiefkühl, Sonstiges";
+
+// Links sind oft ganzer Teilen-Text («Schau mal: … https://fooby.ch/…») – URL herauslösen.
+function extractUrl(text) { const m = (text || "").match(/https?:\/\/[^\s]+/); return m ? m[0] : null; }
+function recipeSource(rec) { if (rec.pdf_library_id || rec.pdf_base64) return "pdf"; if (extractUrl(rec.link)) return "link"; return null; }
+function mediaTypeFor(name) {
+  const ext = (name || "").toLowerCase().split(".").pop();
+  return { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" }[ext] || "application/pdf";
+}
+function parseServings(v) { const n = parseInt(Array.isArray(v) ? v[0] : String(v ?? ""), 10); return n > 0 && n < 50 ? n : null; }
+
+// Liefert Zutaten eines Rezepts; nutzt den Cache (meals.extracted_ingredients), wenn er zur aktuellen
+// Quelle passt (v2-Format). Ältere Einträge ohne Quelle (oft nur geschätzt) werden ignoriert.
+async function ingredientsForRecipe(rec, cached, pdfLibrary) {
+  const source = recipeSource(rec);
+  if (!source) return null;
+  const ref = source === "link" ? extractUrl(rec.link) : (rec.pdf_library_id || rec.pdf_name);
+  if (cached?.v === 2 && cached.source === source && cached.ref === ref && cached.items?.length) return { ...cached, fresh: false };
+
+  let servings, items;
+  if (source === "link") {
+    const d = await (await fetch(`/api/scrape?url=${encodeURIComponent(ref)}`)).json();
+    if (!d.success || !d.ingredients?.length) throw new Error(d.error || "Keine Zutaten gefunden");
+    servings = parseServings(d.servings); items = d.ingredients;
+  } else {
+    const lib = pdfLibrary.find(p => p.id === rec.pdf_library_id);
+    const base64 = rec.pdf_base64 || lib?.pdf_base64;
+    if (!base64) throw new Error("Datei nicht gefunden");
+    const raw = await callClaude(`Lies die Zutaten aus diesem Rezept. Antworte NUR mit JSON:
+{"portionen": 4, "zutaten": [{"name":"Zutat","amount":200,"unit":"g","category":"Gemüse & Früchte"}]}
+"portionen" = für wie viele Personen das Rezept ist (null, wenn nicht angegeben). "amount" ist eine Zahl.
+Kategorien: ${CATEGORIES}. Kein Text, kein Markdown.`, base64, 3, mediaTypeFor(lib?.name || rec.pdf_name));
+    const s = raw.replace(/```json|```/gi, "");
+    const d = JSON.parse(s.slice(s.indexOf("{"), s.lastIndexOf("}") + 1));
+    if (!d.zutaten?.length) throw new Error("Keine Zutaten im Rezept erkannt");
+    servings = parseServings(d.portionen); items = d.zutaten;
+  }
+  return { v: 2, source, ref, servings, items, fresh: true };
 }
 
 // Scale ingredients from recipe_persons to cook_persons
@@ -227,46 +255,13 @@ export default function App() {
     const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates };
     if (existing?.id) meal.id = existing.id;
 
-    // Use pre-extracted ingredients from library selection if available
-    const recipes = JSON.parse(meal.recipes || "[]");
-    const stored = JSON.parse(meal.extracted_ingredients || "{}");
-    for (const rec of recipes) {
-      if (rec._ingredients?.length > 0) stored[rec.id] = rec._ingredients;
-    }
-    meal.extracted_ingredients = JSON.stringify(stored);
-
     // Strip large base64 data from recipes before saving to DB
-    const recipesForDb = recipes.map(rec => {
-      const { pdf_base64, pdf_base64_temp, _ingredients, ...rest } = rec;
-      return rest;
-    });
-    meal.recipes = JSON.stringify(recipesForDb);
+    const recipes = JSON.parse(meal.recipes || "[]");
+    meal.recipes = JSON.stringify(recipes.map(({ pdf_base64, pdf_base64_temp, _ingredients, ...rest }) => rest));
 
-    // Step 1: Save immediately (no large base64 in DB)
-    const saved = await sb.upsertMeal(t, meal);
+    // Zutaten werden erst beim Generieren aus PDF/Link gelesen (und dann zwischengespeichert).
+    await sb.upsertMeal(t, meal);
     await loadMeals();
-
-    // Step 2: Extract ingredients in background after save using temp base64 or library
-    const savedId = Array.isArray(saved) ? saved[0]?.id : saved?.id;
-    const needsExtraction = recipes.filter(rec => !stored[rec.id] && (rec.name || rec.pdf_name));
-    if (needsExtraction.length > 0 && savedId) {
-      const updatedStored = { ...stored };
-      for (const rec of needsExtraction) {
-        try {
-          // Use temp base64 (freshly uploaded) or fetch from library
-          let pdf = rec.pdf_base64_temp || null;
-          if (!pdf && rec.pdf_library_id) {
-            const t2 = await getValidToken();
-            const libItem = pdfLibrary.find(p => p.id === rec.pdf_library_id);
-            pdf = libItem?.pdf_base64 || null;
-          }
-          const ingredients = await extractIngredients(rec.name || rec.pdf_name, pdf);
-          if (ingredients.length > 0) updatedStored[rec.id] = ingredients;
-        } catch {}
-      }
-      await sb.upsertMeal(t, { ...meal, id: savedId, extracted_ingredients: JSON.stringify(updatedStored) });
-      await loadMeals();
-    }
   }
 
   async function removeMeal(dayIdx, slot) {
@@ -293,38 +288,33 @@ export default function App() {
         setLoading(false);
         return;
       }
-      // Use stored ingredients and scale mathematically
+      // Zutaten nur aus hinterlegten Quellen (PDF/Bild oder Link) – Rezepte nur mit Namen werden übersprungen.
       const allItems = [];
-      const extractedMap = JSON.parse(mealsWithContent[0]?.extracted_ingredients || "{}");
-
+      const skipped = [];
+      const failed = [];
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
         // Beim Vorkochen wird für die spätere Mahlzeit mitgekocht.
         const cookPers = (m.persons || 2) + ((m.also_next_lunch || m.leftover_date) ? (m.next_lunch_persons || m.persons || 2) : 0);
-        const stored = JSON.parse(m.extracted_ingredients || "{}");
-
+        let cache = {};
+        try { cache = JSON.parse(m.extracted_ingredients || "{}"); } catch {}
+        let cacheChanged = false;
         for (const rec of recipes) {
-          const recipePers = rec.recipe_persons || 2;
-          const storedIngredients = stored[rec.id] || [];
-
-          if (storedIngredients.length > 0) {
-            // Use stored + scale mathematically
-            const scaled = scaleIngredients(storedIngredients, recipePers, cookPers);
-            allItems.push(...scaled);
-          } else {
-            // Fallback: ask Claude to extract + scale
-            const name = rec.name || rec.pdf_name || "Unbenanntes Rezept";
-            const extracted = await extractIngredients(name, rec.pdf_base64 || null);
-            const scaled = scaleIngredients(extracted, recipePers, cookPers);
-            allItems.push(...scaled);
-          }
+          const label = rec.name || rec.pdf_name || "Rezept";
+          if (!recipeSource(rec)) { skipped.push(label); continue; }
+          try {
+            const r = await ingredientsForRecipe(rec, cache[rec.id], pdfLibrary);
+            if (r.fresh) { const { fresh, ...entry } = r; cache[rec.id] = entry; cacheChanged = true; }
+            allItems.push(...scaleIngredients(r.items, r.servings || rec.recipe_persons || 2, cookPers));
+          } catch { failed.push(label); }
         }
+        if (cacheChanged) await sb.upsertMeal(t, { ...m, extracted_ingredients: JSON.stringify(cache) });
       }
 
       // Merge duplicate ingredients
       const merged = {};
       for (const item of allItems) {
-        const key = item.name.toLowerCase().trim();
+        const key = `${item.name.toLowerCase().trim()}|${(item.unit || "").toLowerCase()}`;
         if (merged[key]) {
           merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
         } else {
@@ -342,8 +332,11 @@ export default function App() {
       await sb.setSetting(t, "last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");
-      if (added === 0) alert("Keine Zutaten gefunden.");
-      else alert(`${added} Zutaten zur Einkaufsliste hinzugefügt.`);
+      alert([
+        added === 0 ? "Keine Zutaten gefunden." : `${added} Zutaten zur Einkaufsliste hinzugefügt.`,
+        skipped.length ? `Ohne Rezept übersprungen: ${skipped.join(", ")}` : "",
+        failed.length ? `Rezept nicht lesbar: ${failed.join(", ")}` : "",
+      ].filter(Boolean).join("\n\n"));
     } catch (e) { alert("Fehler: " + e.message); }
     setLoading(false);
   }
@@ -591,10 +584,6 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
                     updateRecipe(rec.id, "pdf_base64", ""); // clear old base64
                     const recName = rec.name || item.name.replace(".pdf","");
                     if (!rec.name) updateRecipe(rec.id, "name", recName);
-                    // Extract ingredients from library PDF (async)
-                    extractIngredients(recName, item.pdf_base64).then(ingr => {
-                      if (ingr.length > 0) updateRecipe(rec.id, "_ingredients", ingr);
-                    }).catch(() => {});
                   }
                 }} defaultValue="">
                   <option value="" disabled>Rezept wählen…</option>
