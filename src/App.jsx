@@ -18,6 +18,8 @@ const sb = {
   async deleteShoppingItem(token, id) { await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "DELETE", headers: this.authHeaders(token) }); },
   async updateShoppingItem(token, id, updates) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "PATCH", headers: { ...this.authHeaders(token), Prefer: "return=representation" }, body: JSON.stringify(updates) })).json(); },
   async getLeftoverMeals(token, from, to) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals?leftover_date=gte.${from}&leftover_date=lte.${to}&select=*`, { headers: this.authHeaders(token) })).json(); },
+  // Ändert einzelne Felder, ohne updated_at anzufassen (z.B. Zutaten-Cache, generated_at).
+  async patchMeal(token, id, fields) { await fetch(`${SUPABASE_URL}/rest/v1/meals?id=eq.${id}`, { method: "PATCH", headers: this.authHeaders(token), body: JSON.stringify(fields) }); },
   async getPdfLibrary(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library?select=*&order=name`, { headers: this.authHeaders(token) })).json(); },
   async savePdfToLibrary(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
   async getSetting(token, key) {
@@ -287,13 +289,12 @@ export default function App() {
     setLoading(true);
     try {
       const t = await getValidToken(); if (!t) { setLoading(false); return; }
-      const lastGenerated = await sb.getSetting(t, "last_generated");
+      // Pro Menü: neu/geändert seit seine Zutaten zuletzt erfolgreich übernommen wurden (generated_at).
       const mealsWithContent = meals.filter(m => {
         try {
           const hasRecipes = JSON.parse(m.recipes || "[]").length > 0;
           if (!hasRecipes) return false;
-          if (!lastGenerated) return true;
-          return new Date(m.updated_at || m.created_at) > new Date(lastGenerated);
+          return !m.generated_at || new Date(m.updated_at || m.created_at) > new Date(m.generated_at);
         } catch { return false; }
       });
       if (!mealsWithContent.length) {
@@ -312,16 +313,21 @@ export default function App() {
         let cache = {};
         try { cache = JSON.parse(m.extracted_ingredients || "{}"); } catch {}
         let cacheChanged = false;
+        let mealFailed = false;
         for (const rec of recipes) {
           const label = rec.name || rec.pdf_name || "Rezept";
           if (!recipeSource(rec)) { skipped.push(label); continue; }
           try {
             const r = await ingredientsForRecipe(rec, cache[rec.id], pdfLibrary);
             if (r.fresh) { const { fresh, ...entry } = r; cache[rec.id] = entry; cacheChanged = true; }
-            allItems.push(...scaleIngredients(r.items, r.servings || rec.recipe_persons || 2, cookPers));
-          } catch { failed.push(label); }
+            allItems.push(...scaleIngredients(r.items, r.servings || rec.recipe_persons || 2, cookPers).map(i => ({ ...i, recipes: [label] })));
+          } catch { failed.push(label); mealFailed = true; }
         }
-        if (cacheChanged) await sb.upsertMeal(t, { ...m, extracted_ingredients: JSON.stringify(cache) });
+        // generated_at nur, wenn alle Rezepte gelesen werden konnten – sonst nächstes Mal nochmals.
+        const patch = {};
+        if (cacheChanged) patch.extracted_ingredients = JSON.stringify(cache);
+        if (!mealFailed) patch.generated_at = new Date().toISOString();
+        if (Object.keys(patch).length) await sb.patchMeal(t, m.id, patch);
       }
 
       // Merge duplicate ingredients
@@ -330,6 +336,7 @@ export default function App() {
         const key = `${item.name.toLowerCase().trim()}|${(item.unit || "").toLowerCase()}`;
         if (merged[key]) {
           merged[key].amount = Math.round((merged[key].amount + item.amount) * 100) / 100;
+          merged[key].recipes = [...(merged[key].recipes || []), ...(item.recipes || [])];
         } else {
           merged[key] = { ...item };
         }
@@ -338,17 +345,15 @@ export default function App() {
       // Add all items, then save timestamp
       let added = 0;
       for (const item of items) {
-        await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false });
+        await sb.upsertShoppingItem(t, { name: item.name, amount: String(item.amount ?? ""), unit: item.unit || "", category: item.category || "Sonstiges", checked: false, manual: false, source_recipes: [...new Set(item.recipes || [])].join(", ") || null });
         added++;
       }
-      // Save timestamp to Supabase (shared across devices)
-      await sb.setSetting(t, "last_generated", new Date().toISOString());
       await loadShopping();
       setPage("shopping");
       alert([
         added === 0 ? "Keine Zutaten gefunden." : `${added} Zutaten zur Einkaufsliste hinzugefügt.`,
         skipped.length ? `Ohne Rezept übersprungen: ${skipped.join(", ")}` : "",
-        failed.length ? `Rezept nicht lesbar: ${failed.join(", ")}` : "",
+        failed.length ? `Rezept nicht lesbar: ${failed.join(", ")} – wird beim nächsten Generieren nochmals versucht.` : "",
       ].filter(Boolean).join("\n\n"));
     } catch (e) { alert("Fehler: " + e.message); }
     setLoading(false);
