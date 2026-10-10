@@ -17,6 +17,7 @@ const sb = {
   async upsertShoppingItem(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
   async deleteShoppingItem(token, id) { await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "DELETE", headers: this.authHeaders(token) }); },
   async updateShoppingItem(token, id, updates) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?id=eq.${id}`, { method: "PATCH", headers: { ...this.authHeaders(token), Prefer: "return=representation" }, body: JSON.stringify(updates) })).json(); },
+  async getLeftoverMeals(token, from, to) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals?leftover_date=gte.${from}&leftover_date=lte.${to}&select=*`, { headers: this.authHeaders(token) })).json(); },
   async getPdfLibrary(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library?select=*&order=name`, { headers: this.authHeaders(token) })).json(); },
   async savePdfToLibrary(token, item) { return (await fetch(`${SUPABASE_URL}/rest/v1/pdf_library`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify(item) })).json(); },
   async getSetting(token, key) {
@@ -91,6 +92,19 @@ function getMonday(d) {
   date.setDate(date.getDate() + (day === 0 ? -6 : 1 - day)); date.setHours(0,0,0,0); return date;
 }
 function weekKey(d) { return d.toISOString().split("T")[0]; }
+// Echtes lokales Datum (weekKey nutzt UTC und liegt in der Schweiz einen Tag früher; bleibt für week_start so).
+function isoDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+const SLOT_NAMES = { morgen: "Morgen", mittag: "Mittag", abend: "Abend" };
+// Vorkoch-Ziel als Text, z.B. «→ Fr 17.10. Mittag». Ziel wird in der Expo-App frei gewählt.
+function leftoverLabel(meal) {
+  if (meal?.leftover_date) {
+    const [y, m, d] = meal.leftover_date.split("-").map(Number);
+    const date = new Date(y, m - 1, d);
+    return `→ ${DAYS[(date.getDay() + 6) % 7].slice(0, 2)} ${fmt(date)} ${SLOT_NAMES[meal.leftover_slot] || ""}`;
+  }
+  if (meal?.also_next_lunch) return meal.day_index >= 5 ? "→ Mo Mittag" : "→ morgen";
+  return "";
+}
 function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
 function fmt(d) { return d.toLocaleDateString("de-CH", { day: "2-digit", month: "2-digit" }); }
 function fmtFull(d) { return d.toLocaleDateString("de-CH", { weekday: "short", day: "2-digit", month: "2-digit" }); }
@@ -111,6 +125,7 @@ export default function App() {
   const [weekStart, setWeekStart] = useState(() => getMonday(new Date()));
   const [meals, setMeals] = useState([]);
   const [prevWeekMeals, setPrevWeekMeals] = useState([]);
+  const [leftoverMeals, setLeftoverMeals] = useState([]);
   const [shopping, setShopping] = useState([]);
   const [pdfLibrary, setPdfLibrary] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -131,12 +146,14 @@ export default function App() {
   const loadMeals = useCallback(async () => {
     if (!token) return;
     const t = await getValidToken(); if (!t) return;
-    const [data, prevData] = await Promise.all([
+    const [data, prevData, leftData] = await Promise.all([
       sb.getMeals(t, wk),
       sb.getMeals(t, weekKey(addDays(weekStart, -7))),
+      sb.getLeftoverMeals(t, isoDate(weekStart), isoDate(addDays(weekStart, 6))),
     ]);
     if (Array.isArray(data)) setMeals(data);
     if (Array.isArray(prevData)) setPrevWeekMeals(prevData);
+    if (Array.isArray(leftData)) setLeftoverMeals(leftData);
   }, [token, wk]);
 
   const loadShopping = useCallback(async () => {
@@ -158,15 +175,22 @@ export default function App() {
   useEffect(() => { loadPdfLibrary(); }, [loadPdfLibrary]);
 
   function getMeal(dayIdx, slot) {
+    const directMeal = meals.find(m => m.day_index === dayIdx && m.slot === slot);
+    if (directMeal) return directMeal;
+    // Vorgekocht mit frei gewähltem Ziel (leftover_date/leftover_slot)
+    const cooked = leftoverMeals.find(m => m.leftover_date === isoDate(addDays(weekStart, dayIdx)) && m.leftover_slot === slot);
+    if (cooked) return { ...cooked, _inherited: true, day_index: dayIdx, slot, persons: cooked.next_lunch_persons || cooked.persons };
+    // Ältere Einträge ohne Ziel: «Auch morgen Mittag» / Wochenende → Montag Mittag
+    const legacy = m => m.also_next_lunch && !m.leftover_date;
     if (slot === "mittag") {
       const direct = meals.find(m => m.day_index === dayIdx && m.slot === slot);
       if (dayIdx === 0) {
         // Monday: check all 4 weekend slots (Sa Mittag=5, Sa Abend=5, So Mittag=6, So Abend=6) from prev week
         const weekendSlots = [
-          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "mittag" && m.also_next_lunch),
-          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "abend" && m.also_next_lunch),
-          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "mittag" && m.also_next_lunch),
-          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "abend" && m.also_next_lunch),
+          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "mittag" && legacy(m)),
+          prevWeekMeals.find(m => m.day_index === 5 && m.slot === "abend" && legacy(m)),
+          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "mittag" && legacy(m)),
+          prevWeekMeals.find(m => m.day_index === 6 && m.slot === "abend" && legacy(m)),
         ].filter(Boolean);
         const prev = weekendSlots[0];
         if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
@@ -175,7 +199,7 @@ export default function App() {
         // Saturday (dayIdx=5) Mittag should not inherit from Friday Abend via weekend toggle
         const isWeekendMittag = dayIdx === 6; // Sunday Mittag never inherits from Saturday
         if (!isWeekendMittag) {
-          const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && m.also_next_lunch);
+          const prev = meals.find(m => m.day_index === dayIdx - 1 && m.slot === "abend" && legacy(m));
           if (prev && !direct) return { ...prev, _inherited: true, day_index: dayIdx, slot: "mittag", persons: prev.next_lunch_persons || prev.persons };
         }
       }
@@ -275,7 +299,8 @@ export default function App() {
 
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
-        const cookPers = m.persons || 2;
+        // Beim Vorkochen wird für die spätere Mahlzeit mitgekocht.
+        const cookPers = (m.persons || 2) + ((m.also_next_lunch || m.leftover_date) ? (m.next_lunch_persons || m.persons || 2) : 0);
         const stored = JSON.parse(m.extracted_ingredients || "{}");
 
         for (const rec of recipes) {
@@ -453,13 +478,15 @@ function PlanPage({ weekStart, setWeekStart, getMeal, saveMeal, removeMeal, gene
 // ── Meal Tile ─────────────────────────────────────────────────────────────────
 function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, token, loadPdfLibrary, getValidToken, dayIdx }) {
   const [persons, setPersons] = useState(meal?.persons ?? 2);
-  const [alsoLunch, setAlsoLunch] = useState(meal?.also_next_lunch ?? false);
+  const [alsoLunch, setAlsoLunch] = useState(!!(meal?.also_next_lunch || meal?.leftover_date));
+  // Frei gewähltes Ziel aus der Expo-App (nicht das Standard-«morgen Mittag»)
+  const hasCustomTarget = !!meal?.leftover_date && !meal?.also_next_lunch;
   const [nextLunchPersons, setNextLunchPersons] = useState(meal?.next_lunch_persons ?? meal?.persons ?? 2);
   const [recipes, setRecipes] = useState(() => { try { return JSON.parse(meal?.recipes || "[]"); } catch { return []; } });
 
   useEffect(() => {
     setPersons(meal?.persons ?? 2);
-    setAlsoLunch(meal?.also_next_lunch ?? false);
+    setAlsoLunch(!!(meal?.also_next_lunch || meal?.leftover_date));
     setNextLunchPersons(meal?.next_lunch_persons ?? meal?.persons ?? 2);
     try { setRecipes(JSON.parse(meal?.recipes || "[]")); } catch { setRecipes([]); }
   }, [meal?.id, isEdit]);
@@ -517,7 +544,7 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
 
       {!isEdit && hasContent && (
         <div style={S.mealInfo}>
-          {isInherited && <div style={S.inheritedBadge}>↑ Vorabend</div>}
+          {isInherited && <div style={S.inheritedBadge}>🍱 vorgekocht</div>}
           {recipes.map((rec, i) => (
             <div key={rec.id || i} style={S.recipeRow}>
               {rec.name && <div style={S.mealName}>{rec.name}</div>}
@@ -527,7 +554,7 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
           ))}
           <div style={S.mealMeta}>
             👥 {meal?.persons ?? 2} Pers.
-            {meal?.also_next_lunch && <span style={S.lunchBadge}>→ morgen</span>}
+            {!isInherited && leftoverLabel(meal) && <span style={S.lunchBadge}>🍱 {leftoverLabel(meal)}</span>}
           </div>
         </div>
       )}
@@ -591,13 +618,13 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
             <button style={S.countBtn} onClick={() => setPersons(persons+1)}>+</button>
             <span style={S.personLabel}>Pers.</span>
           </div>
-          {(slot === "abend" || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && (
+          {(hasCustomTarget || slot === "abend" || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && (
             <label style={S.checkLabel}>
               <input type="checkbox" checked={alsoLunch} onChange={e => setAlsoLunch(e.target.checked)} style={{ marginRight: 6 }} />
-              {(dayIdx === 5 || dayIdx === 6) ? "→ Montag Mittag" : "Auch morgen Mittag"}
+              {hasCustomTarget ? `Vorgekocht ${leftoverLabel(meal)}` : (dayIdx === 5 || dayIdx === 6) ? "→ Montag Mittag" : "Auch morgen Mittag"}
             </label>
           )}
-          {((slot === "abend") || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && alsoLunch && (
+          {(hasCustomTarget || (slot === "abend") || (slot === "mittag" && (dayIdx === 5 || dayIdx === 6))) && alsoLunch && (
             <div style={{ ...S.personRow, marginTop: 2 }}>
               <span style={S.personLabel}>🌤 Mittag für:</span>
               <button style={S.countBtn} onClick={() => setNextLunchPersons(p => Math.max(1, p - 1))}>−</button>
@@ -606,7 +633,7 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
               <span style={S.personLabel}>Pers.</span>
             </div>
           )}
-          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch, next_lunch_persons: nextLunchPersons, recipes: JSON.stringify(recipes) })}>Speichern</button>
+          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch && !hasCustomTarget, next_lunch_persons: nextLunchPersons, recipes: JSON.stringify(recipes), ...(alsoLunch ? {} : { leftover_date: null, leftover_slot: null }) })}>Speichern</button>
         </div>
       )}
     </div>
