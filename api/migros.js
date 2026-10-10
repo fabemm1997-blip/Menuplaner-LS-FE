@@ -1,3 +1,5 @@
+import { requireUser } from "./_auth.js";
+
 // Migros Shopping List Integration
 // Uses unofficial Migros API - may break if Migros changes their API
 
@@ -130,8 +132,9 @@ async function addToShoppingList(products, token, cookies) {
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(200).end();
+  if (!(await requireUser(req, res))) return;
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const { items } = req.body;

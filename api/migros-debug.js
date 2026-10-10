@@ -1,5 +1,8 @@
+import { requireUser } from "./_auth.js";
+
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "application/json");
+  if (!(await requireUser(req, res))) return;
 
   const email = process.env.MIGROS_EMAIL;
   const password = process.env.MIGROS_PASSWORD;

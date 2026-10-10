@@ -10,7 +10,7 @@ const sb = {
   async signOut(token) { await fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { ...this.headers, Authorization: `Bearer ${token}` } }); },
   async refreshToken(rt) { return (await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, { method: "POST", headers: this.headers, body: JSON.stringify({ refresh_token: rt }) })).json(); },
   authHeaders(token) { return { ...this.headers, Authorization: `Bearer ${token}` }; },
-  async getMeals(token, weekStart) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals?week_start=eq.${weekStart}&select=*`, { headers: this.authHeaders(token) })).json(); },
+  async getMeals(token, weekKeys) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals?week_start=in.(${weekKeys.join(",")})&select=*&order=week_start.desc`, { headers: this.authHeaders(token) })).json(); },
   async upsertMeal(token, meal) { return (await fetch(`${SUPABASE_URL}/rest/v1/meals`, { method: "POST", headers: { ...this.authHeaders(token), Prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify({ ...meal, updated_at: new Date().toISOString() }) })).json(); },
   async deleteMeal(token, id) { await fetch(`${SUPABASE_URL}/rest/v1/meals?id=eq.${id}`, { method: "DELETE", headers: this.authHeaders(token) }); },
   async getShoppingItems(token) { return (await fetch(`${SUPABASE_URL}/rest/v1/shopping_items?select=*&order=category,name`, { headers: this.authHeaders(token) })).json(); },
@@ -30,6 +30,9 @@ const sb = {
   },
 };
 
+// Eigene API-Routen verlangen den Supabase-Login (siehe api/_auth.js).
+function apiAuth() { const t = localStorage.getItem("mp_token"); return t ? { Authorization: `Bearer ${t}` } : {}; }
+
 async function callClaude(prompt, pdfBase64 = null, retries = 3, mediaType = "application/pdf") {
   // PDFs als Dokument, Bilder (z.B. Screenshots in der Bibliothek) als Bild
   const file = mediaType.startsWith("image/")
@@ -39,7 +42,7 @@ async function callClaude(prompt, pdfBase64 = null, retries = 3, mediaType = "ap
     ? [{ role: "user", content: [file, { type: "text", text: prompt }] }]
     : [{ role: "user", content: prompt }];
   for (let i = 0; i < retries; i++) {
-    const r = await fetch("/api/claude", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ max_tokens: 2000, messages }) });
+    const r = await fetch("/api/claude", { method: "POST", headers: { "Content-Type": "application/json", ...apiAuth() }, body: JSON.stringify({ max_tokens: 2000, messages }) });
     const d = await r.json();
     if (d.error?.type === "overloaded_error") {
       if (i < retries - 1) {
@@ -83,7 +86,7 @@ async function ingredientsForRecipe(rec, cached, pdfLibrary) {
 
   let servings, items;
   if (source === "link") {
-    const d = await (await fetch(`/api/scrape?url=${encodeURIComponent(ref)}`)).json();
+    const d = await (await fetch(`/api/scrape?url=${encodeURIComponent(ref)}`, { headers: apiAuth() })).json();
     if (!d.success || !d.ingredients?.length) throw new Error(d.error || "Keine Zutaten gefunden");
     servings = parseServings(d.servings); items = d.ingredients;
   } else {
@@ -119,8 +122,11 @@ function getMonday(d) {
   const date = new Date(d); const day = date.getDay();
   date.setDate(date.getDate() + (day === 0 ? -6 : 1 - day)); date.setHours(0,0,0,0); return date;
 }
-function weekKey(d) { return d.toISOString().split("T")[0]; }
-// Echtes lokales Datum (weekKey nutzt UTC und liegt in der Schweiz einen Tag früher; bleibt für week_start so).
+// Schlüssel einer Woche = Datum des Montags (lokal). Früher toISOString → in der Schweiz der Sonntag davor;
+// solche Einträge werden über legacyWeekKey weiterhin gelesen.
+function weekKey(d) { return isoDate(d); }
+function legacyWeekKey(d) { return isoDate(addDays(d, -1)); }
+// Echtes lokales Datum als YYYY-MM-DD
 function isoDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
 const SLOT_NAMES = { morgen: "Morgen", mittag: "Mittag", abend: "Abend" };
 // Vorkoch-Ziel als Text, z.B. «→ Fr 17.10. Mittag». Ziel wird in der Expo-App frei gewählt.
@@ -175,8 +181,8 @@ export default function App() {
     if (!token) return;
     const t = await getValidToken(); if (!t) return;
     const [data, prevData, leftData] = await Promise.all([
-      sb.getMeals(t, wk),
-      sb.getMeals(t, weekKey(addDays(weekStart, -7))),
+      sb.getMeals(t, [wk, legacyWeekKey(weekStart)]),
+      sb.getMeals(t, [weekKey(addDays(weekStart, -7)), legacyWeekKey(addDays(weekStart, -7))]),
       sb.getLeftoverMeals(t, isoDate(weekStart), isoDate(addDays(weekStart, 6))),
     ]);
     if (Array.isArray(data)) setMeals(data);
@@ -201,6 +207,13 @@ export default function App() {
   useEffect(() => { loadMeals(); }, [loadMeals]);
   useEffect(() => { loadShopping(); }, [loadShopping]);
   useEffect(() => { loadPdfLibrary(); }, [loadPdfLibrary]);
+  // Synchron mit dem anderen Gerät bleiben: beim Zurückkehren in die App und alle 30 s neu laden.
+  useEffect(() => {
+    const refresh = () => { if (document.visibilityState === "visible") { loadMeals(); loadShopping(); } };
+    document.addEventListener("visibilitychange", refresh);
+    const timer = setInterval(refresh, 30000);
+    return () => { document.removeEventListener("visibilitychange", refresh); clearInterval(timer); };
+  }, [loadMeals, loadShopping]);
 
   function getMeal(dayIdx, slot) {
     const directMeal = meals.find(m => m.day_index === dayIdx && m.slot === slot);
@@ -252,7 +265,7 @@ export default function App() {
     }
 
     const existing = meals.find(m => m.day_index === dayIdx && m.slot === slot);
-    const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates };
+    const meal = { week_start: wk, day_index: dayIdx, slot, persons: 2, also_next_lunch: false, next_lunch_persons: 2, recipes: "[]", extracted_ingredients: "{}", ...(existing || {}), ...updates, week_start: wk };
     if (existing?.id) meal.id = existing.id;
 
     // Strip large base64 data from recipes before saving to DB
@@ -640,7 +653,7 @@ function MigrosExportBtn({ items }) {
     try {
       const r = await fetch("/api/migros", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...apiAuth() },
         body: JSON.stringify({ items: items.map(i => ({ name: i.name, amount: i.amount, unit: i.unit })) }),
       });
       const d = await r.json();
