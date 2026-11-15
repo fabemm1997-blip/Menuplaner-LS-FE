@@ -124,10 +124,8 @@ function getMonday(d) {
   const date = new Date(d); const day = date.getDay();
   date.setDate(date.getDate() + (day === 0 ? -6 : 1 - day)); date.setHours(0,0,0,0); return date;
 }
-// Schlüssel einer Woche = Datum des Montags (lokal). Früher toISOString → in der Schweiz der Sonntag davor;
-// solche Einträge werden über legacyWeekKey weiterhin gelesen.
+// Schlüssel einer Woche = Datum des Montags (lokal).
 function weekKey(d) { return isoDate(d); }
-function legacyWeekKey(d) { return isoDate(addDays(d, -1)); }
 // Echtes lokales Datum als YYYY-MM-DD
 function isoDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
 const SLOT_NAMES = { morgen: "Morgen", mittag: "Mittag", abend: "Abend" };
@@ -183,8 +181,8 @@ export default function App() {
     if (!token) return;
     const t = await getValidToken(); if (!t) return;
     const [data, prevData, leftData] = await Promise.all([
-      sb.getMeals(t, [wk, legacyWeekKey(weekStart)]),
-      sb.getMeals(t, [weekKey(addDays(weekStart, -7)), legacyWeekKey(addDays(weekStart, -7))]),
+      sb.getMeals(t, [wk]),
+      sb.getMeals(t, [weekKey(addDays(weekStart, -7))]),
       sb.getLeftoverMeals(t, isoDate(weekStart), isoDate(addDays(weekStart, 6))),
     ]);
     if (Array.isArray(data)) setMeals(data);
