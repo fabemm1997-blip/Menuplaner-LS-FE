@@ -129,12 +129,27 @@ function weekKey(d) { return isoDate(d); }
 // Echtes lokales Datum als YYYY-MM-DD
 function isoDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
 const SLOT_NAMES = { morgen: "Morgen", mittag: "Mittag", abend: "Abend" };
-// Vorkoch-Ziel als Text, z.B. «→ Fr 17.10. Mittag». Ziel wird in der Expo-App frei gewählt.
+// Vorkoch-Ziele [{ date, slot, persons }] (in der Expo-App gewählt); ältere Einträge haben nur leftover_date.
+function leftoversOf(meal) {
+  if (!meal) return [];
+  if (Array.isArray(meal.leftovers) && meal.leftovers.length) return meal.leftovers;
+  if (meal.leftover_date) return [{ date: meal.leftover_date, slot: meal.leftover_slot || "mittag", persons: meal.next_lunch_persons || meal.persons || 2 }];
+  return [];
+}
+function laterPersons(meal) {
+  const t = leftoversOf(meal);
+  if (t.length) return t.reduce((sum, x) => sum + (x.persons || 0), 0);
+  return meal?.also_next_lunch ? (meal.next_lunch_persons || meal.persons || 2) : 0;
+}
+// Vorkoch-Ziele als Text, z.B. «→ Fr 17.10. Mittag, Sa 18.10. Abend».
 function leftoverLabel(meal) {
-  if (meal?.leftover_date) {
-    const [y, m, d] = meal.leftover_date.split("-").map(Number);
-    const date = new Date(y, m - 1, d);
-    return `→ ${DAYS[(date.getDay() + 6) % 7].slice(0, 2)} ${fmt(date)} ${SLOT_NAMES[meal.leftover_slot] || ""}`;
+  const targets = leftoversOf(meal);
+  if (targets.length) {
+    return "→ " + targets.map(t => {
+      const [y, m, d] = t.date.split("-").map(Number);
+      const date = new Date(y, m - 1, d);
+      return `${DAYS[(date.getDay() + 6) % 7].slice(0, 2)} ${fmt(date)} ${SLOT_NAMES[t.slot] || ""}`;
+    }).join(", ");
   }
   if (meal?.also_next_lunch) return meal.day_index >= 5 ? "→ Mo Mittag" : "→ morgen";
   return "";
@@ -218,11 +233,14 @@ export default function App() {
   function getMeal(dayIdx, slot) {
     const directMeal = meals.find(m => m.day_index === dayIdx && m.slot === slot);
     if (directMeal) return directMeal;
-    // Vorgekocht mit frei gewähltem Ziel (leftover_date/leftover_slot)
-    const cooked = leftoverMeals.find(m => m.leftover_date === isoDate(addDays(weekStart, dayIdx)) && m.leftover_slot === slot);
-    if (cooked) return { ...cooked, _inherited: true, day_index: dayIdx, slot, persons: cooked.next_lunch_persons || cooked.persons };
+    // Vorgekocht mit frei gewählten Zielen
+    const date = isoDate(addDays(weekStart, dayIdx));
+    for (const cooked of [...leftoverMeals, ...meals, ...prevWeekMeals]) {
+      const t = leftoversOf(cooked).find(x => x.date === date && x.slot === slot);
+      if (t) return { ...cooked, _inherited: true, day_index: dayIdx, slot, persons: t.persons || cooked.persons };
+    }
     // Ältere Einträge ohne Ziel: «Auch morgen Mittag» / Wochenende → Montag Mittag
-    const legacy = m => m.also_next_lunch && !m.leftover_date;
+    const legacy = m => m.also_next_lunch && !leftoversOf(m).length;
     if (slot === "mittag") {
       const direct = meals.find(m => m.day_index === dayIdx && m.slot === slot);
       if (dayIdx === 0) {
@@ -307,7 +325,7 @@ export default function App() {
       for (const m of mealsWithContent) {
         const recipes = JSON.parse(m.recipes || "[]");
         // Beim Vorkochen wird für die spätere Mahlzeit mitgekocht.
-        const cookPers = (m.persons || 2) + ((m.also_next_lunch || m.leftover_date) ? (m.next_lunch_persons || m.persons || 2) : 0);
+        const cookPers = (m.persons || 2) + laterPersons(m);
         let cache = {};
         try { cache = JSON.parse(m.extracted_ingredients || "{}"); } catch {}
         let cacheChanged = false;
@@ -638,7 +656,7 @@ function MealTile({ slot, meal, isEdit, onEdit, onSave, onRemove, pdfLibrary, to
               <span style={S.personLabel}>Pers.</span>
             </div>
           )}
-          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch && !hasCustomTarget, next_lunch_persons: nextLunchPersons, recipes: JSON.stringify(recipes), ...(alsoLunch ? {} : { leftover_date: null, leftover_slot: null }) })}>Speichern</button>
+          <button style={S.saveBtn} onClick={() => onSave({ persons, also_next_lunch: alsoLunch && !hasCustomTarget, next_lunch_persons: nextLunchPersons, recipes: JSON.stringify(recipes), ...(alsoLunch ? {} : { leftover_date: null, leftover_slot: null, leftovers: null }) })}>Speichern</button>
         </div>
       )}
     </div>
