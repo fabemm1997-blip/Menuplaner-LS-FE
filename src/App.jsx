@@ -5,7 +5,6 @@ const SUPABASE_KEY = "sb_publishable_vE3lREJGQpdiSPmaj7zGmQ_PX1Gf-rN";
 
 const sb = {
   headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Accept-Profile": "menu", "Content-Profile": "menu" },   // Daten liegen im Schema «menu» von livio-platform
-  async signUp(email, password) { return (await fetch(`${SUPABASE_URL}/auth/v1/signup`, { method: "POST", headers: this.headers, body: JSON.stringify({ email, password }) })).json(); },
   async signIn(email, password) { return (await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method: "POST", headers: this.headers, body: JSON.stringify({ email, password }) })).json(); },
   async signOut(token) { await fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { ...this.headers, Authorization: `Bearer ${token}` } }); },
   async refreshToken(rt) { return (await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, { method: "POST", headers: this.headers, body: JSON.stringify({ refresh_token: rt }) })).json(); },
@@ -408,10 +407,9 @@ function LoginPage({ onLogin }) {
   async function handle() {
     setErr(""); setBusy(true);
     try {
-      const data = await (mode === "login" ? sb.signIn(email, pw) : sb.signUp(email, pw));
+      const data = await sb.signIn(email, pw);
       if (data.access_token) onLogin(data);
       else if (data.error_description || data.msg) setErr(data.error_description || data.msg);
-      else if (mode === "signup") { setErr("Registrierung erfolgreich! Bitte einloggen."); setMode("login"); }
     } catch (e) { setErr(e.message); }
     setBusy(false);
   }
@@ -427,7 +425,7 @@ function LoginPage({ onLogin }) {
         <input style={S.input} type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} />
         <input style={S.input} type="password" placeholder="Passwort" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} />
         {err && <p style={{ color: C.danger, fontSize: 12, textAlign: "center" }}>{err}</p>}
-        <button style={S.primaryBtn} onClick={handle} disabled={busy}>{busy ? "⏳…" : mode === "login" ? "Anmelden" : "Registrieren"}</button>
+        <button style={S.primaryBtn} onClick={handle} disabled={busy}>{busy ? "⏳…" : "Anmelden"}</button>
       </div>
     </div>
   );
