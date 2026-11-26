@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 
-const SUPABASE_URL = "https://lsgjtbfogugaypcewvdm.supabase.co";
-const SUPABASE_KEY = "sb_publishable_HDLUGvJCBCdES7lbF_CHLg_k0G7aUXi";
+const SUPABASE_URL = "https://bwnnhrhjvcrjidaqkkzf.supabase.co";
+const SUPABASE_KEY = "sb_publishable_vE3lREJGQpdiSPmaj7zGmQ_PX1Gf-rN";
 
 const sb = {
-  headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+  headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Accept-Profile": "menu", "Content-Profile": "menu" },   // Daten liegen im Schema «menu» von livio-platform
   async signUp(email, password) { return (await fetch(`${SUPABASE_URL}/auth/v1/signup`, { method: "POST", headers: this.headers, body: JSON.stringify({ email, password }) })).json(); },
   async signIn(email, password) { return (await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method: "POST", headers: this.headers, body: JSON.stringify({ email, password }) })).json(); },
   async signOut(token) { await fetch(`${SUPABASE_URL}/auth/v1/logout`, { method: "POST", headers: { ...this.headers, Authorization: `Bearer ${token}` } }); },
@@ -423,7 +423,6 @@ function LoginPage({ onLogin }) {
         <p style={{ textAlign: "center", color: C.muted, fontSize: 14, marginTop: -8 }}>Für euch zwei 💑</p>
         <div style={S.loginTabs}>
           <button style={{ ...S.tab, ...(mode === "login" ? S.tabActive : {}) }} onClick={() => setMode("login")}>Anmelden</button>
-          <button style={{ ...S.tab, ...(mode === "signup" ? S.tabActive : {}) }} onClick={() => setMode("signup")}>Registrieren</button>
         </div>
         <input style={S.input} type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} />
         <input style={S.input} type="password" placeholder="Passwort" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === "Enter" && handle()} />

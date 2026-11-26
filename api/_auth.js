@@ -3,8 +3,8 @@
 // bei Supabase. Ohne gültigen Login: 401 – so kann niemand die Routen auf unsere Kosten nutzen.
 // URL und Publishable Key sind öffentlich und bewusst fest eingetragen: die Vercel-Variablen
 // SUPABASE_URL/SUPABASE_KEY zeigten nicht auf dieses Projekt, die Prüfung schlug dadurch immer fehl.
-const SUPABASE_URL = "https://lsgjtbfogugaypcewvdm.supabase.co";
-const SUPABASE_KEY = "sb_publishable_HDLUGvJCBCdES7lbF_CHLg_k0G7aUXi";
+const SUPABASE_URL = "https://bwnnhrhjvcrjidaqkkzf.supabase.co";
+const SUPABASE_KEY = "sb_publishable_vE3lREJGQpdiSPmaj7zGmQ_PX1Gf-rN";
 
 export async function requireUser(req, res) {
   const header = req.headers.authorization || "";
